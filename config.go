@@ -7,6 +7,8 @@ import (
 
 // https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md
 
+const defaultAutoCommitIntervalMS = 5000
+
 type ConsumerConfig struct {
 	BoostrapServers      string
 	GroupID              string
@@ -23,7 +25,7 @@ func (c *ConsumerConfig) toConfigMap() *kafka.ConfigMap {
 	}
 
 	if c.AutoCommitIntervalMS == 0 {
-		c.AutoCommitIntervalMS = 5000
+		c.AutoCommitIntervalMS = defaultAutoCommitIntervalMS
 	}
 
 	if c.ConsumerDebug == "" {
