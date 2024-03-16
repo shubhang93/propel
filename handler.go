@@ -1,4 +1,4 @@
-package epcons
+package propel
 
 type Handler interface {
 	Handle(record Record)
