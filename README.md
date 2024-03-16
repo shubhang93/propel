@@ -12,7 +12,7 @@
 ## Config
 
 ```go
-&epcon.Config{
+propel.ConsumerConfig{
 	BoostrapServers: "localhost:9092", // Comma separated list of servers
 	GroupID:         "consumer_group_id",
 }
@@ -33,7 +33,7 @@ import (
 )
 
 func main() {
-	pc := epcon.PartitionConsumer{
+	tc := propel.ThrottledConsumer{
 		BatchSize: 500,
 		BatchHandler: propel.BatchHandler(func(records propel.Records) {
 			time.Sleep(500 * time.Millisecond)
@@ -47,7 +47,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	// comma separated value of list of topics
-	err := pc.Run(ctx, "driver-location-ping-3")
+	err := tc.Run(ctx, "localhost:9092")
 	if err != nil {
 		log.Fatal(err)
 	}

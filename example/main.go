@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	pc := propel.ThrottledConsumer{
+	tc := propel.ThrottledConsumer{
 		BatchHandler: propel.BatchHandlerFunc(func(records propel.Records) {
 			slog.Info("processing records", "tp", propel.TopicPartFor(records))
 			time.Sleep(10 * time.Second)
@@ -26,7 +26,7 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	err := pc.Run(ctx, "test-topic")
+	err := tc.Run(ctx, "test-topic")
 	if err != nil {
 		log.Fatal(err)
 	}
