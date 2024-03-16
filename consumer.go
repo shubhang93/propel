@@ -46,6 +46,8 @@ type ThrottledConsumer struct {
 	BatchSize           int
 	BatchHandler        BatchHandler
 	Handler             Handler
+	BatchHandlerFunc    BatchHandlerFunc
+	HandlerFunc         HandlerFunc
 	Config              *ConsumerConfig
 	WorkerStopTimeoutMS time.Duration
 	Logger              *slog.Logger
@@ -247,8 +249,8 @@ func (tc *ThrottledConsumer) setDefaults() {
 		tc.BatchSize = 500
 	}
 
-	if tc.BatchHandler == nil && tc.Handler == nil {
-		panic("batch handler and handler cannot be nil")
+	if (tc.BatchHandler == nil && tc.Handler == nil) || (tc.BatchHandlerFunc == nil && tc.HandlerFunc == nil) {
+		panic("one of [BatchHandler,Handler,BatchHandlerFunc,HandlerFunc] must be set")
 	}
 
 	if tc.WorkerStopTimeoutMS == 0 {
