@@ -3,6 +3,7 @@ package propel
 import (
 	"context"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/stretchr/testify/mock"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -11,102 +12,121 @@ import (
 )
 
 type MockConsumer struct {
-	PollFunc         func(timeout int) kafka.Event
-	SubscribeFunc    func(topics string, cb kafka.RebalanceCb) error
-	StoreMessageFunc func(m *kafka.Message) (storedOffsets []kafka.TopicPartition, err error)
-	LogsFunc         func() chan kafka.LogEvent
-	PauseFunc        func([]kafka.TopicPartition) error
-	ResumeFunc       func([]kafka.TopicPartition) error
-	CloseFunc        func() error
+	mock.Mock
 }
 
 func (m *MockConsumer) Poll(timeout int) kafka.Event {
-	if m.PollFunc == nil {
-		return nil
-	}
-	return m.PollFunc(timeout)
+	args := m.Mock.Called(timeout)
+	return args.Get(0).(kafka.Event)
 }
 
 func (m *MockConsumer) Subscribe(topics string, cb kafka.RebalanceCb) error {
-	if m.StoreMessageFunc == nil {
-		return nil
-	}
-	return m.SubscribeFunc(topics, cb)
+	args := m.Mock.Called(topics, cb)
+	return args.Get(0).(error)
 }
 
 func (m *MockConsumer) StoreMessage(msg *kafka.Message) (storedOffsets []kafka.TopicPartition, err error) {
-	if m.StoreMessageFunc == nil {
-		return []kafka.TopicPartition{}, nil
-	}
-	return m.StoreMessageFunc(msg)
+	args := m.Mock.Called(msg)
+	return args.Get(0).([]kafka.TopicPartition), args.Get(1).(error)
 }
 
 func (m *MockConsumer) Close() error {
-	if m.CloseFunc == nil {
-		return nil
-	}
-	return m.CloseFunc()
+	args := m.Mock.Called()
+	return args.Get(0).(error)
 }
 
 func (m *MockConsumer) Logs() chan kafka.LogEvent {
-	return m.LogsFunc()
+	args := m.Mock.Called()
+	return args.Get(0).(chan kafka.LogEvent)
 }
 
 func (m *MockConsumer) Pause(tps []kafka.TopicPartition) error {
-	if m.PauseFunc == nil {
-		return nil
-	}
-	return m.PauseFunc(tps)
+	args := m.Mock.Called(tps)
+	return args.Get(0).(error)
 }
 
 func (m *MockConsumer) Resume(tps []kafka.TopicPartition) error {
-	if m.ResumeFunc == nil {
-		return nil
-	}
-	return m.ResumeFunc(tps)
+	args := m.Mock.Called(tps)
+	return args.Get(0).(error)
 }
 
 func TestPartitionConsumer_pollBatch(t *testing.T) {
-	var offset int64
-	mc := MockConsumer{
-		PollFunc: func(timeout int) kafka.Event {
-			if offset > 150 {
-				return nil
-			}
-			offset++
-			return &kafka.Message{TopicPartition: kafka.TopicPartition{Offset: kafka.Offset(offset)}}
-		},
-		SubscribeFunc: func(topics string, cb kafka.RebalanceCb) error {
-			return nil
-		},
-		StoreMessageFunc: func(m *kafka.Message) (storedOffsets []kafka.TopicPartition, err error) {
-			return nil, err
-		},
-		CloseFunc: func() error {
-			return nil
-		},
-	}
+	t.Run("Confluent consumer returns a *kafka.Message", func(t *testing.T) {
+		mc := MockConsumer{}
 
-	pc := ThrottledConsumer{
-		c:      &mc,
-		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
-	}
+		tc := ThrottledConsumer{
+			c:      &mc,
+			Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		}
 
-	batch := make([]*kafka.Message, 100)
-	n, err := pc.pollBatch(context.Background(), 100, batch)
-	if err != nil {
-		t.Errorf("expected error nil got %v\n", err)
-	}
-	if len(batch) != n {
-		t.Errorf("expected %d got %d\n", n, len(batch))
-	}
-	t.Logf("%v\n", batch)
+		mc.On("Poll", 100).Return(&kafka.Message{})
 
-	n, err = pc.pollBatch(context.Background(), 100, batch)
-	if len(batch[:n]) != n {
-		t.Errorf("expected %d got %d\n", n, len(batch[:n]))
-	}
-	t.Logf("%v\n", batch[:n])
+		batch := make([]*kafka.Message, 100)
+		n, err := tc.pollBatch(context.Background(), 100, batch)
+		if err != nil {
+			t.Errorf("expected error nil got %v\n", err)
+			return
+		}
+		if len(batch) != n {
+			t.Errorf("expected %d got %d\n", n, len(batch))
+			return
+		}
+
+		n, err = tc.pollBatch(context.Background(), 100, batch)
+		if len(batch[:n]) != n {
+			t.Errorf("expected %d got %d\n", n, len(batch[:n]))
+		}
+	})
+
+	t.Run("Confluent consumer returns a non fatal error", func(t *testing.T) {
+		mc := MockConsumer{}
+
+		tc := ThrottledConsumer{
+			c:      &mc,
+			Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		}
+
+		mc.On("Poll", 100).Return(kafka.Error{})
+
+		batch := make([]*kafka.Message, 100)
+		n, err := tc.pollBatch(context.Background(), 100, batch)
+		if err != nil {
+			t.Errorf("expected nil error got %v\n", err)
+			return
+		}
+
+		expectedCount := 0
+		if expectedCount != n {
+			t.Errorf("expected %d got %d\n", expectedCount, n)
+			return
+		}
+
+	})
+
+	t.Run("Confluent consumer returns a fatal error", func(t *testing.T) {
+		mc := MockConsumer{}
+
+		tc := ThrottledConsumer{
+			c:      &mc,
+			Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		}
+
+		mc.On("Poll", 100).Return(kafka.NewError(kafka.ErrAllBrokersDown, "error kafka", true))
+
+		batch := make([]*kafka.Message, 100)
+		n, err := tc.pollBatch(context.Background(), 100, batch)
+		if err == nil {
+			t.Errorf("expected error got %v\n", err)
+			return
+		}
+
+		expectedCount := 0
+		if expectedCount != n {
+			t.Errorf("expected %d got %d\n", expectedCount, n)
+			return
+		}
+
+	})
 
 }
 
