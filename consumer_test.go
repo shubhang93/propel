@@ -87,7 +87,7 @@ func TestPartitionConsumer_pollBatch(t *testing.T) {
 		},
 	}
 
-	pc := PartitionConsumer{
+	pc := ThrottledConsumer{
 		c:      &mc,
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
 	}
@@ -154,12 +154,12 @@ func TestPartitionConsumer_Run(t *testing.T) {
 
 	var readCount int32
 	batchSize := 500
-	pc := PartitionConsumer{
+	pc := ThrottledConsumer{
 		BatchSize: batchSize,
 		BatchHandler: BatchHandlerFunc(func(records Records) {
 			atomic.AddInt32(&readCount, int32(len(records)))
 		}),
-		Config: &Config{BoostrapServers: brokers, GroupID: "test", AutoOffsetReset: "earliest"},
+		Config: &ConsumerConfig{BoostrapServers: brokers, GroupID: "test", AutoOffsetReset: "earliest"},
 	}
 
 	go func() {

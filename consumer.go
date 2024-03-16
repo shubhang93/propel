@@ -40,13 +40,13 @@ type ConfluentConsumer interface {
 	Logs() chan kafka.LogEvent
 }
 
-type PartitionConsumer struct {
+type ThrottledConsumer struct {
 	c                   ConfluentConsumer
 	workers             map[topicPart]*batchWorker
 	BatchSize           int
 	BatchHandler        BatchHandler
 	Handler             Handler
-	Config              *Config
+	Config              *ConsumerConfig
 	WorkerStopTimeoutMS time.Duration
 	Logger              *slog.Logger
 	lastPoll            time.Time
@@ -59,38 +59,38 @@ func groupMsgs(msgs []*kafka.Message, group map[topicPart][]*kafka.Message) {
 	}
 }
 
-func (pc *PartitionConsumer) Run(ctx context.Context, topics string) error {
-	pc.setDefaults()
+func (tc *ThrottledConsumer) Run(ctx context.Context, topics string) error {
+	tc.setDefaults()
 
-	c, err := kafka.NewConsumer(pc.Config.toConfigMap())
+	c, err := kafka.NewConsumer(tc.Config.toConfigMap())
 	if err != nil {
 		return err
 	}
-	pc.c = c
-	logs := pc.c.Logs()
+	tc.c = c
+	logs := tc.c.Logs()
 	go func() {
 		for evt := range logs {
-			pc.Logger.Info(evt.Message, slog.Int("level", evt.Level))
+			tc.Logger.Info(evt.Message, slog.Int("level", evt.Level))
 		}
 	}()
 
 	defer func() {
-		err := pc.c.Close()
+		err := tc.c.Close()
 		if err != nil {
-			pc.Logger.Error("consumer close error", "err", err)
+			tc.Logger.Error("consumer close error", "err", err)
 		}
-		pc.Logger.Info("consumer closed without errors")
+		tc.Logger.Info("consumer closed without errors")
 
 	}()
 
 	committable := make(chan progress, maxPartitionCount)
-	err = pc.c.Subscribe(topics, func(consumer *kafka.Consumer, event kafka.Event) error {
+	err = tc.c.Subscribe(topics, func(consumer *kafka.Consumer, event kafka.Event) error {
 		// Locks are not required when we
 		// modify the workers map because
 		// rebalance callabck blocks the poll loop
 
-		rbLogger := pc.Logger.WithGroup("rb-callback")
-		pc.Logger.Info("rebalance callback invoked")
+		rbLogger := tc.Logger.WithGroup("rb-callback")
+		tc.Logger.Info("rebalance callback invoked")
 
 		switch e := event.(type) {
 		case kafka.AssignedPartitions:
@@ -102,29 +102,29 @@ func (pc *PartitionConsumer) Run(ctx context.Context, topics string) error {
 					records:     make(chan []*kafka.Message, 1),
 					stop:        make(chan struct{}),
 					done:        make(chan struct{}, 1),
-					logger:      pc.Logger.WithGroup("worker"),
+					logger:      tc.Logger.WithGroup("worker"),
 					committable: committable,
 				}
-				pc.workers[tp] = bw
-				if pc.BatchHandler != nil {
-					go bw.consumeBatch(pc.BatchHandler)
+				tc.workers[tp] = bw
+				if tc.BatchHandler != nil {
+					go bw.consumeBatch(tc.BatchHandler)
 					continue
 				}
-				go bw.consumeSingle(pc.Handler)
+				go bw.consumeSingle(tc.Handler)
 			}
 		case kafka.RevokedPartitions:
-			pc.Logger.Info("assignment status", "lost", c.AssignmentLost())
+			tc.Logger.Info("assignment status", "lost", c.AssignmentLost())
 			var wg sync.WaitGroup
 			tps := make([]topicPart, 0, len(e.Partitions))
 			for _, part := range e.Partitions {
 				tp := topicPart{Topic: *part.Topic, Part: part.Partition}
-				if pc.workers[tp] == nil {
+				if tc.workers[tp] == nil {
 					continue
 				}
 				wg.Add(1)
 				go func() {
-					w := pc.workers[tp]
-					pc.stopWorker(w, pc.WorkerStopTimeoutMS*time.Millisecond)
+					w := tc.workers[tp]
+					tc.stopWorker(w, tc.WorkerStopTimeoutMS*time.Millisecond)
 					rbLogger.Info("stopped worker", slog.String("tp", tp.String()))
 					wg.Done()
 				}()
@@ -132,7 +132,7 @@ func (pc *PartitionConsumer) Run(ctx context.Context, topics string) error {
 			}
 			wg.Wait()
 			for _, tp := range tps {
-				delete(pc.workers, tp)
+				delete(tc.workers, tp)
 			}
 
 			rbLogger.Info("stopped all revoked workers")
@@ -153,17 +153,17 @@ func (pc *PartitionConsumer) Run(ctx context.Context, topics string) error {
 		default:
 		}
 
-		batch := make([]*kafka.Message, pc.BatchSize)
-		n, err := pc.pollBatch(ctx, defaultPollTimeoutMS, batch)
-		pc.Logger.Debug("poll diff", "diff-ms", time.Now().Sub(pc.lastPoll).Milliseconds())
-		pc.lastPoll = time.Now()
+		batch := make([]*kafka.Message, tc.BatchSize)
+		n, err := tc.pollBatch(ctx, defaultPollTimeoutMS, batch)
+		tc.Logger.Debug("poll diff", "diff-ms", time.Now().Sub(tc.lastPoll).Milliseconds())
+		tc.lastPoll = time.Now()
 		if err != nil {
-			pc.Logger.Error("poll batch err", slog.String("err", err.Error()))
+			tc.Logger.Error("poll batch err", slog.String("err", err.Error()))
 			return err
 		}
 
-		pc.Logger.Debug("poll fetched", slog.Int("count", n))
-		if n < pc.BatchSize {
+		tc.Logger.Debug("poll fetched", slog.Int("count", n))
+		if n < tc.BatchSize {
 			clear(batch[n+1:])
 		}
 
@@ -172,44 +172,44 @@ func (pc *PartitionConsumer) Run(ctx context.Context, topics string) error {
 		if n > 0 {
 			groupMsgs(batch[:n], msgGroup)
 			for tp := range msgGroup {
-				if pc.workers[tp] == nil {
+				if tc.workers[tp] == nil {
 					continue
 				}
 				pauseable = append(pauseable, kafka.TopicPartition{Topic: &tp.Topic, Partition: tp.Part})
-				pc.Logger.Debug("sending", "tp", tp, "count", len(msgGroup[tp]))
-				pc.workers[tp].records <- msgGroup[tp]
+				tc.Logger.Debug("sending", "tp", tp, "count", len(msgGroup[tp]))
+				tc.workers[tp].records <- msgGroup[tp]
 			}
 		}
 
-		pc.Logger.Debug("pausing", "parts", pauseable)
-		if err := pc.c.Pause(pauseable); err != nil {
+		tc.Logger.Debug("pausing", "parts", pauseable)
+		if err := tc.c.Pause(pauseable); err != nil {
 			return fmt.Errorf("pause failed:%w", err)
 		}
 
-		pc.Logger.Debug("enqueuing committable messages", slog.Int("count", len(committable)))
-		if err := pc.enqueueCommits(committable); err != nil {
+		tc.Logger.Debug("enqueuing committable messages", slog.Int("count", len(committable)))
+		if err := tc.enqueueCommits(committable); err != nil {
 			return err
 		}
 
 	}
 }
 
-func (pc *PartitionConsumer) stopWorker(worker *batchWorker, timeout time.Duration) {
+func (tc *ThrottledConsumer) stopWorker(worker *batchWorker, timeout time.Duration) {
 	close(worker.stop)
 	after := time.After(timeout)
 	select {
 	case <-worker.done:
 		return
 	case <-after:
-		pc.Logger.Info("worker shutdown timed out", "worker", worker)
+		tc.Logger.Info("worker shutdown timed out", "worker", worker)
 	}
 }
 
-func (pc *PartitionConsumer) pollBatch(ctx context.Context, timeoutMS int, batch []*kafka.Message) (int, error) {
+func (tc *ThrottledConsumer) pollBatch(ctx context.Context, timeoutMS int, batch []*kafka.Message) (int, error) {
 	remainingTime := time.Duration(timeoutMS) * time.Millisecond
 	endTime := time.Now().Add(time.Duration(timeoutMS) * time.Millisecond)
 
-	pollLogger := pc.Logger.WithGroup("poll")
+	pollLogger := tc.Logger.WithGroup("poll")
 	done := ctx.Done()
 	var i int
 	for i < cap(batch) {
@@ -218,7 +218,7 @@ func (pc *PartitionConsumer) pollBatch(ctx context.Context, timeoutMS int, batch
 			pollLogger.Info("starting shutdown context done")
 			return 0, ctx.Err()
 		default:
-			e := pc.c.Poll(timeoutMS)
+			e := tc.c.Poll(timeoutMS)
 			switch event := e.(type) {
 			case kafka.Error:
 				if event.IsFatal() {
@@ -237,42 +237,42 @@ func (pc *PartitionConsumer) pollBatch(ctx context.Context, timeoutMS int, batch
 	return i, nil
 }
 
-func (pc *PartitionConsumer) setDefaults() {
-	if pc.Logger == nil {
-		pc.Logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
-		pc.Logger = pc.Logger.WithGroup("propel")
+func (tc *ThrottledConsumer) setDefaults() {
+	if tc.Logger == nil {
+		tc.Logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
+		tc.Logger = tc.Logger.WithGroup("propel")
 	}
 
-	if pc.BatchSize < 1 {
-		pc.BatchSize = 500
+	if tc.BatchSize < 1 {
+		tc.BatchSize = 500
 	}
 
-	if pc.BatchHandler == nil && pc.Handler == nil {
+	if tc.BatchHandler == nil && tc.Handler == nil {
 		panic("batch handler and handler cannot be nil")
 	}
 
-	if pc.WorkerStopTimeoutMS == 0 {
-		pc.WorkerStopTimeoutMS = defaultWorkerStopTimeoutMS
+	if tc.WorkerStopTimeoutMS == 0 {
+		tc.WorkerStopTimeoutMS = defaultWorkerStopTimeoutMS
 	}
 
-	if pc.workers == nil {
-		pc.workers = make(map[topicPart]*batchWorker, maxPartitionCount)
+	if tc.workers == nil {
+		tc.workers = make(map[topicPart]*batchWorker, maxPartitionCount)
 	}
 }
 
-func (pc *PartitionConsumer) enqueueCommits(committable chan progress) error {
+func (tc *ThrottledConsumer) enqueueCommits(committable chan progress) error {
 	var resumeable []kafka.TopicPartition
 	for i := 0; i < len(committable); i++ {
 		p := <-committable
 		msg := p.m
 		tp := topicPart{Topic: *msg.TopicPartition.Topic, Part: msg.TopicPartition.Partition}
 
-		if pc.workers[tp] == nil {
+		if tc.workers[tp] == nil {
 			continue
 		}
 
-		if _, err := pc.c.StoreMessage(msg); err != nil {
-			pc.Logger.Error("error storing message", "error", err)
+		if _, err := tc.c.StoreMessage(msg); err != nil {
+			tc.Logger.Error("error storing message", "error", err)
 			return err
 		}
 
@@ -281,8 +281,8 @@ func (pc *PartitionConsumer) enqueueCommits(committable chan progress) error {
 		}
 	}
 
-	pc.Logger.Debug("resumeable", "parts", resumeable)
-	if err := pc.c.Resume(resumeable); err != nil {
+	tc.Logger.Debug("resumeable", "parts", resumeable)
+	if err := tc.c.Resume(resumeable); err != nil {
 		return fmt.Errorf("error resuming:%w", err)
 	}
 

@@ -7,7 +7,7 @@ import (
 
 // https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md
 
-type Config struct {
+type ConsumerConfig struct {
 	BoostrapServers      string
 	GroupID              string
 	ConsumerDebug        string
@@ -16,7 +16,7 @@ type Config struct {
 	ConfigMapOverride    kafka.ConfigMap
 }
 
-func (c *Config) toConfigMap() *kafka.ConfigMap {
+func (c *ConsumerConfig) toConfigMap() *kafka.ConfigMap {
 
 	if c.AutoOffsetReset == "" {
 		c.AutoOffsetReset = "latest"
