@@ -1,6 +1,6 @@
-# epcons [ Events platform consumer ]
+#  [ Propel ]
 
-### epcons is a thin wrapper over the Confluent kafka Go library
+### propel is a thin wrapper over the Confluent kafka Go library
 
 ### Features
 
@@ -13,7 +13,7 @@
 
 ```go
 &epcon.Config{
-	BoostrapServers: "g-gojek-id-mainstream.golabs.io:6668", // Comma separated list of servers
+	BoostrapServers: "localhost:9092", // Comma separated list of servers
 	GroupID:         "consumer_group_id",
 }
 ```
@@ -27,8 +27,7 @@ import (
 	"context"
 	"log"
 	"os/signal"
-	"source.golabs.io/engineering-platforms/epcon"
-	"source.golabs.io/engineering-platforms/epcons"
+	"source.golabs.io/engineering-platforms/propel"
 	"syscall"
 	"time"
 )
@@ -36,11 +35,11 @@ import (
 func main() {
 	pc := epcon.PartitionConsumer{
 		BatchSize: 500,
-		BatchHandler: epcons.BatchHandler(func(records epcons.Records) {
+		BatchHandler: propel.BatchHandler(func(records propel.Records) {
 			time.Sleep(500 * time.Millisecond)
 		}),
 		Config: &epcon.Config{
-			BoostrapServers: "g-gojek-id-mainstream.golabs.io:6668",
+			BoostrapServers: "localhost:9092",
 			GroupID:         "test_part_cons",
 		},
 	}
@@ -63,15 +62,6 @@ Retry logic can be implemented in your handler if the message processing fails. 
 library to keep the consumption separate from retries, this makes the library extremely complicated and difficult to
 change. Middleware contributions are always welcome.
 
-### What are my options to retry
-
-You can use redis to retry your messages, or use a kafkacar to push it to a kafka topic meant for retries.
-
-### Why isn't the API similar to Ziggurat
-
-Ziggurat is a great framework for creating bootstrapped Kafka consumer based applications, but over the years it has
-been extremely difficult to change and its API footprint is huge. It also exposes a ton of config which makes it
-difficult to track
 
 ### How are offsets committed
 
