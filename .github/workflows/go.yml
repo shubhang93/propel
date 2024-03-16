@@ -25,5 +25,6 @@ jobs:
         run: go build -v ./...
 
       - name: Test
-        run: export CONSUMER_TIMEOUT_MS=30s \
+        run: |
+          export CONSUMER_TIMEOUT_MS=30s \
           go test -v ./...
