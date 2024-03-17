@@ -6,7 +6,6 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -30,41 +29,34 @@ func (t topicPart) String() string {
 	return fmt.Sprintf("%s#%d", t.Topic, t.Part)
 }
 
-type ConfluentConsumer interface {
-	Poll(timeout int) kafka.Event
-	Subscribe(topics string, cb kafka.RebalanceCb) error
-	StoreMessage(m *kafka.Message) (storedOffsets []kafka.TopicPartition, err error)
-	Close() error
-	Pause([]kafka.TopicPartition) error
-	Resume([]kafka.TopicPartition) error
-	Logs() chan kafka.LogEvent
-}
-
 type ThrottledConsumer struct {
-	c                   ConfluentConsumer
-	workers             map[topicPart]*batchWorker
-	BatchSize           int
-	BatchHandler        BatchHandler
-	Handler             Handler
-	BatchHandlerFunc    BatchHandlerFunc
-	HandlerFunc         HandlerFunc
-	Config              *ConsumerConfig
+	c       confluentConsumer
+	workers map[topicPart]*batchWorker
+
+	BatchSize int
+
+	BatchHandler     BatchHandler
+	Handler          Handler
+	BatchHandlerFunc BatchHandlerFunc
+	HandlerFunc      HandlerFunc
+
+	committable chan progress
+
+	consumerInitFunc  func(c *kafka.ConfigMap) (*kafka.Consumer, error)
+	KafkaConsumerConf *ConsumerConfig
+	rebalanceCallback kafka.RebalanceCb
+
 	WorkerStopTimeoutMS time.Duration
 	Logger              *slog.Logger
-	lastPoll            time.Time
-}
 
-func groupMsgs(msgs []*kafka.Message, group map[topicPart][]*kafka.Message) {
-	for _, msg := range msgs {
-		tp := topicPart{Topic: *msg.TopicPartition.Topic, Part: msg.TopicPartition.Partition}
-		group[tp] = append(group[tp], msg)
-	}
+	lastPoll time.Time
 }
 
 func (tc *ThrottledConsumer) Run(ctx context.Context, topics string) error {
-	tc.setDefaults()
+	// init all required states
+	tc.mustInit()
 
-	c, err := kafka.NewConsumer(tc.Config.toConfigMap())
+	c, err := tc.consumerInitFunc(tc.KafkaConsumerConf.toConfigMap())
 	if err != nil {
 		return err
 	}
@@ -86,62 +78,7 @@ func (tc *ThrottledConsumer) Run(ctx context.Context, topics string) error {
 	}()
 
 	committable := make(chan progress, maxPartitionCount)
-	err = tc.c.Subscribe(topics, func(consumer *kafka.Consumer, event kafka.Event) error {
-		// Locks are not required when we
-		// modify the workers map because
-		// rebalance callabck blocks the poll loop
-
-		rbLogger := tc.Logger.WithGroup("rb-callback")
-		tc.Logger.Info("rebalance callback invoked")
-
-		switch e := event.(type) {
-		case kafka.AssignedPartitions:
-			for _, part := range e.Partitions {
-				tp := topicPart{Topic: *part.Topic, Part: part.Partition}
-				bw := &batchWorker{
-					part:        tp.Part,
-					topic:       tp.Topic,
-					records:     make(chan []*kafka.Message, 1),
-					stop:        make(chan struct{}),
-					done:        make(chan struct{}, 1),
-					logger:      tc.Logger.WithGroup("worker"),
-					committable: committable,
-				}
-				tc.workers[tp] = bw
-				if tc.BatchHandler != nil {
-					go bw.consumeBatch(tc.BatchHandler)
-					continue
-				}
-				go bw.consumeSingle(tc.Handler)
-			}
-		case kafka.RevokedPartitions:
-			tc.Logger.Info("assignment status", "lost", c.AssignmentLost())
-			var wg sync.WaitGroup
-			tps := make([]topicPart, 0, len(e.Partitions))
-			for _, part := range e.Partitions {
-				tp := topicPart{Topic: *part.Topic, Part: part.Partition}
-				if tc.workers[tp] == nil {
-					continue
-				}
-				wg.Add(1)
-				go func() {
-					w := tc.workers[tp]
-					tc.stopWorker(w, tc.WorkerStopTimeoutMS*time.Millisecond)
-					rbLogger.Info("stopped worker", slog.String("tp", tp.String()))
-					wg.Done()
-				}()
-				tps = append(tps, tp)
-			}
-			wg.Wait()
-			for _, tp := range tps {
-				delete(tc.workers, tp)
-			}
-
-			rbLogger.Info("stopped all revoked workers")
-		}
-
-		return nil
-	})
+	err = tc.c.Subscribe(topics, rebalanceCallback(tc))
 	if err != nil {
 		return err
 	}
@@ -239,17 +176,23 @@ func (tc *ThrottledConsumer) pollBatch(ctx context.Context, timeoutMS int, batch
 	return i, nil
 }
 
-func (tc *ThrottledConsumer) setDefaults() {
+func (tc *ThrottledConsumer) mustInit() {
 	if tc.Logger == nil {
 		tc.Logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 		tc.Logger = tc.Logger.WithGroup("propel")
 	}
 
+	tc.consumerInitFunc = func(c *kafka.ConfigMap) (*kafka.Consumer, error) {
+		return kafka.NewConsumer(c)
+	}
+
+	tc.rebalanceCallback = rebalanceCallback(tc)
+
 	if tc.BatchSize < 1 {
 		tc.BatchSize = 500
 	}
 
-	if (tc.BatchHandler == nil && tc.Handler == nil) || (tc.BatchHandlerFunc == nil && tc.HandlerFunc == nil) {
+	if (tc.BatchHandler == nil && tc.Handler == nil) && (tc.BatchHandlerFunc == nil && tc.HandlerFunc == nil) {
 		panic("one of [BatchHandler,Handler,BatchHandlerFunc,HandlerFunc] must be set")
 	}
 
@@ -260,6 +203,7 @@ func (tc *ThrottledConsumer) setDefaults() {
 	if tc.workers == nil {
 		tc.workers = make(map[topicPart]*batchWorker, maxPartitionCount)
 	}
+
 }
 
 func (tc *ThrottledConsumer) enqueueCommits(committable chan progress) error {
@@ -289,4 +233,11 @@ func (tc *ThrottledConsumer) enqueueCommits(committable chan progress) error {
 	}
 
 	return nil
+}
+
+func groupMsgs(msgs []*kafka.Message, group map[topicPart][]*kafka.Message) {
+	for _, msg := range msgs {
+		tp := topicPart{Topic: *msg.TopicPartition.Topic, Part: msg.TopicPartition.Partition}
+		group[tp] = append(group[tp], msg)
+	}
 }

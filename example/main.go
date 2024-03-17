@@ -18,7 +18,7 @@ func main() {
 			slog.Info("processing records", "tp", propel.TopicPartFor(records))
 			time.Sleep(10 * time.Second)
 		},
-		Config: &propel.ConsumerConfig{
+		KafkaConsumerConf: &propel.ConsumerConfig{
 			BoostrapServers: "localhost:9092",
 			GroupID:         "test_part_cons",
 		},

@@ -22,17 +22,17 @@ func (m *MockConsumer) Poll(timeout int) kafka.Event {
 
 func (m *MockConsumer) Subscribe(topics string, cb kafka.RebalanceCb) error {
 	args := m.Mock.Called(topics, cb)
-	return args.Get(0).(error)
+	return args.Error(0)
 }
 
 func (m *MockConsumer) StoreMessage(msg *kafka.Message) (storedOffsets []kafka.TopicPartition, err error) {
 	args := m.Mock.Called(msg)
-	return args.Get(0).([]kafka.TopicPartition), args.Get(1).(error)
+	return args.Get(0).([]kafka.TopicPartition), args.Error(1)
 }
 
 func (m *MockConsumer) Close() error {
 	args := m.Mock.Called()
-	return args.Get(0).(error)
+	return args.Error(0)
 }
 
 func (m *MockConsumer) Logs() chan kafka.LogEvent {
@@ -42,12 +42,12 @@ func (m *MockConsumer) Logs() chan kafka.LogEvent {
 
 func (m *MockConsumer) Pause(tps []kafka.TopicPartition) error {
 	args := m.Mock.Called(tps)
-	return args.Get(0).(error)
+	return args.Error(0)
 }
 
 func (m *MockConsumer) Resume(tps []kafka.TopicPartition) error {
 	args := m.Mock.Called(tps)
-	return args.Get(0).(error)
+	return args.Error(0)
 }
 
 func TestPartitionConsumer_pollBatch(t *testing.T) {
@@ -174,18 +174,22 @@ func TestPartitionConsumer_Run(t *testing.T) {
 
 	var readCount int32
 	batchSize := 500
-	pc := ThrottledConsumer{
+	tc := ThrottledConsumer{
 		BatchSize: batchSize,
-		BatchHandler: BatchHandlerFunc(func(records Records) {
+		BatchHandlerFunc: func(records Records) {
 			atomic.AddInt32(&readCount, int32(len(records)))
-		}),
-		Config: &ConsumerConfig{BoostrapServers: brokers, GroupID: "test", AutoOffsetReset: "earliest"},
+		},
+		KafkaConsumerConf: &ConsumerConfig{
+			BoostrapServers: brokers,
+			GroupID:         "test",
+			AutoOffsetReset: "earliest",
+		},
 	}
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), consumerTimeout)
 		defer cancel()
-		_ = pc.Run(ctx, "test")
+		_ = tc.Run(ctx, "test")
 
 		close(delivery)
 	}()
@@ -205,7 +209,7 @@ func TestPartitionConsumer_Run(t *testing.T) {
 
 	<-done
 
-	if readCount != int32(messageCount) {
+	if readCount != atomic.LoadInt32(&readCount) {
 		t.Errorf("expected message count to be %d got %d\n", messageCount, readCount)
 	}
 }
