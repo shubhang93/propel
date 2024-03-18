@@ -26,11 +26,11 @@ func rebalanceCallback(tc *ThrottledConsumer) kafka.RebalanceCb {
 					committable: tc.committable,
 				}
 				tc.workers[tp] = bw
-				if handler := oneOfBatchHandlers(tc.BatchHandlerFunc, tc.BatchHandler); handler != nil {
+				if handler := tc.oneOfBatchHandlers(); handler != nil {
 					go bw.consumeBatch(handler)
 					continue
 				}
-				go bw.consumeSingle(oneOfHandlers(tc.HandlerFunc, tc.Handler))
+				go bw.consumeSingle(tc.oneOfHandlers())
 			}
 		case kafka.RevokedPartitions:
 			tc.Logger.Info("assignment status", "lost", e.Partitions)
@@ -61,22 +61,4 @@ func rebalanceCallback(tc *ThrottledConsumer) kafka.RebalanceCb {
 		return nil
 
 	}
-}
-
-func oneOfBatchHandlers(handlers ...BatchHandler) BatchHandler {
-	for _, bh := range handlers {
-		if bh != nil {
-			return bh
-		}
-	}
-	return nil
-}
-
-func oneOfHandlers(handlers ...Handler) Handler {
-	for _, h := range handlers {
-		if h != nil {
-			return h
-		}
-	}
-	return nil
 }

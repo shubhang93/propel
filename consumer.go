@@ -37,12 +37,12 @@ type ThrottledConsumer struct {
 
 	BatchHandler     BatchHandler
 	Handler          Handler
-	BatchHandlerFunc BatchHandlerFunc
-	HandlerFunc      HandlerFunc
+	BatchHandlerFunc func(records Records)
+	HandlerFunc      func(record Record)
 
 	committable chan progress
 
-	consumerInitFunc  func(c *kafka.ConfigMap) (*kafka.Consumer, error)
+	consumerInitFunc  func(c *kafka.ConfigMap) (confluentConsumer, error)
 	KafkaConsumerConf *ConsumerConfig
 	rebalanceCallback kafka.RebalanceCb
 
@@ -69,15 +69,16 @@ func (tc *ThrottledConsumer) Run(ctx context.Context, topics string) error {
 	}()
 
 	defer func() {
+		for _, w := range tc.workers {
+			tc.stopWorker(w, defaultWorkerStopTimeoutMS*time.Millisecond)
+		}
 		err := tc.c.Close()
 		if err != nil {
 			tc.Logger.Error("consumer close error", "err", err)
 		}
 		tc.Logger.Info("consumer closed without errors")
-
 	}()
 
-	committable := make(chan progress, maxPartitionCount)
 	err = tc.c.Subscribe(topics, rebalanceCallback(tc))
 	if err != nil {
 		return err
@@ -125,8 +126,8 @@ func (tc *ThrottledConsumer) Run(ctx context.Context, topics string) error {
 			return fmt.Errorf("pause failed:%w", err)
 		}
 
-		tc.Logger.Debug("enqueuing committable messages", slog.Int("count", len(committable)))
-		if err := tc.enqueueCommits(committable); err != nil {
+		tc.Logger.Debug("enqueuing committable messages", slog.Int("count", len(tc.committable)))
+		if err := tc.enqueueCommits(); err != nil {
 			return err
 		}
 
@@ -182,11 +183,15 @@ func (tc *ThrottledConsumer) mustInit() {
 		tc.Logger = tc.Logger.WithGroup("propel")
 	}
 
-	tc.consumerInitFunc = func(c *kafka.ConfigMap) (*kafka.Consumer, error) {
-		return kafka.NewConsumer(c)
+	if tc.consumerInitFunc == nil {
+		tc.consumerInitFunc = func(c *kafka.ConfigMap) (confluentConsumer, error) {
+			return kafka.NewConsumer(c)
+		}
 	}
 
-	tc.rebalanceCallback = rebalanceCallback(tc)
+	if tc.rebalanceCallback == nil {
+		tc.rebalanceCallback = rebalanceCallback(tc)
+	}
 
 	if tc.BatchSize < 1 {
 		tc.BatchSize = 500
@@ -200,16 +205,20 @@ func (tc *ThrottledConsumer) mustInit() {
 		tc.WorkerStopTimeoutMS = defaultWorkerStopTimeoutMS
 	}
 
+	if tc.committable == nil {
+		tc.committable = make(chan progress, maxPartitionCount)
+	}
+
 	if tc.workers == nil {
 		tc.workers = make(map[topicPart]*batchWorker, maxPartitionCount)
 	}
 
 }
 
-func (tc *ThrottledConsumer) enqueueCommits(committable chan progress) error {
+func (tc *ThrottledConsumer) enqueueCommits() error {
 	var resumeable []kafka.TopicPartition
-	for i := 0; i < len(committable); i++ {
-		p := <-committable
+	for i := 0; i < len(tc.committable); i++ {
+		p := <-tc.committable
 		msg := p.m
 		tp := topicPart{Topic: *msg.TopicPartition.Topic, Part: msg.TopicPartition.Partition}
 
@@ -240,4 +249,18 @@ func groupMsgs(msgs []*kafka.Message, group map[topicPart][]*kafka.Message) {
 		tp := topicPart{Topic: *msg.TopicPartition.Topic, Part: msg.TopicPartition.Partition}
 		group[tp] = append(group[tp], msg)
 	}
+}
+
+func (tc *ThrottledConsumer) oneOfBatchHandlers() BatchHandler {
+	if tc.BatchHandlerFunc != nil {
+		return BatchHandlerFunc(tc.BatchHandlerFunc)
+	}
+	return tc.BatchHandler
+}
+
+func (tc *ThrottledConsumer) oneOfHandlers() Handler {
+	if tc.HandlerFunc != nil {
+		return HandlerFunc(tc.HandlerFunc)
+	}
+	return tc.Handler
 }

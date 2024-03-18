@@ -28,13 +28,14 @@ func (b *batchWorker) consumeSingle(handler Handler) {
 			close(b.done)
 			return
 		case recs := <-b.records:
-			b.logger.Debug("processing records", "size", len(recs), "worker", b.String())
+			b.logger.Debug("processing records", slog.Int("size", len(recs)), slog.String("worker", b.String()))
 			resume := false
 			for i := range recs {
 				handler.Handle(recs[i])
 				if i == len(recs)-1 {
 					resume = true
 				}
+				b.logger.Debug("sending progress", slog.Int("rec-index", i), slog.String("worker", b.String()))
 				b.committable <- progress{m: recs[i], resume: resume}
 			}
 		}

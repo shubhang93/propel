@@ -50,7 +50,7 @@ func (m *MockConsumer) Resume(tps []kafka.TopicPartition) error {
 	return args.Error(0)
 }
 
-func TestPartitionConsumer_pollBatch(t *testing.T) {
+func TestThrottledConsumer_pollBatch(t *testing.T) {
 	t.Run("Confluent consumer returns a *kafka.Message", func(t *testing.T) {
 		mc := MockConsumer{}
 
@@ -130,7 +130,7 @@ func TestPartitionConsumer_pollBatch(t *testing.T) {
 
 }
 
-func TestPartitionConsumer_Run(t *testing.T) {
+func TestThrottledConsumer_Run(t *testing.T) {
 
 	consumerTimeout := time.Duration(0)
 	timeoutStr := os.Getenv("CONSUMER_TIMEOUT_MS")
@@ -212,4 +212,53 @@ func TestPartitionConsumer_Run(t *testing.T) {
 	if readCount != atomic.LoadInt32(&readCount) {
 		t.Errorf("expected message count to be %d got %d\n", messageCount, readCount)
 	}
+}
+
+func TestThrottledConsumer_PauseResume(t *testing.T) {
+
+	t.Run("pause resume should be called with the right partition sets", func(t *testing.T) {
+		mc := MockConsumer{}
+		tc := ThrottledConsumer{
+			HandlerFunc: func(record Record) {
+
+			},
+			consumerInitFunc: func(c *kafka.ConfigMap) (confluentConsumer, error) {
+				return &mc, nil
+			},
+			KafkaConsumerConf:   &ConsumerConfig{},
+			WorkerStopTimeoutMS: 1000,
+			Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})),
+		}
+
+		msg := &kafka.Message{
+			TopicPartition: kafka.TopicPartition{Topic: toPtr("foo"), Partition: 1},
+		}
+		partSet := []kafka.TopicPartition{{Topic: toPtr("foo"), Partition: 1}}
+
+		mc.On("Poll", 100).Return(msg)
+		mc.On("Subscribe", "foo", mock.Anything).Return(nil)
+		mc.On("StoreMessage", msg).Return(partSet, nil)
+		mc.On("Logs").Return(make(chan kafka.LogEvent), nil)
+		mc.On("Close").Return(nil)
+		mc.On("Pause", partSet).Return(nil)
+		mc.On("Resume", partSet).Return(nil)
+
+		// call must init to set states inorder to trigger rebalance callback
+		tc.mustInit()
+		// trigger a fake rebalance event
+		c, _ := kafka.NewConsumer(&kafka.ConfigMap{})
+		_ = tc.rebalanceCallback(c, kafka.AssignedPartitions{
+			Partitions: partSet,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+		defer cancel()
+		_ = tc.Run(ctx, "foo")
+	})
+}
+
+func toPtr[T any](v T) *T {
+	return &v
 }
